@@ -2,6 +2,8 @@
 import logging
 import re
 
+from medusa.common import USER_AGENT
+
 from babelfish import Language, language_converters
 from guessit import guessit
 from requests import Session
@@ -95,7 +97,7 @@ class Addic7edProvider(Provider):
 
     def initialize(self):
         self.session = Session()
-        self.session.headers['User-Agent'] = self.user_agent
+        self.session.headers['User-Agent'] = USER_AGENT
 
         # login
         if self.username and self.password:
