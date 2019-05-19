@@ -83,7 +83,7 @@ class Addic7edProvider(Provider):
         'slk', 'slv', 'spa', 'sqi', 'srp', 'swe', 'tha', 'tur', 'ukr', 'vie', 'zho'
     ]}
     video_types = (Episode,)
-    server_url = 'http://www.addic7ed.com/'
+    server_url = 'https://www.addic7ed.com/'
     subtitle_class = Addic7edSubtitle
 
     def __init__(self, username=None, password=None):
@@ -106,7 +106,8 @@ class Addic7edProvider(Provider):
             r = self.session.post(self.server_url + 'dologin.php', data, allow_redirects=False, timeout=10)
 
             if r.status_code != 302:
-                raise AuthenticationError(self.username)
+                logger.info('Unable to log in.')
+                return
 
             logger.debug('Logged in')
             self.logged_in = True
@@ -130,6 +131,10 @@ class Addic7edProvider(Provider):
         :rtype: dict
 
         """
+        if not self.logged_in:
+            logger.info('Skipping show ids')
+            return {}
+
         # get the show page
         logger.info('Getting show ids')
         r = self.session.get(self.server_url + 'shows.php', timeout=10)
@@ -154,22 +159,16 @@ class Addic7edProvider(Provider):
         return show_ids
 
     @region.cache_on_arguments(expiration_time=SHOW_EXPIRATION_TIME)
-    def _search_show_id(self, series, year=None):
-        """Search the show id from the `series` and `year`.
+    def _search_show_id(self, pattern):
+        """Search the show id from the `pattern`.
 
-        :param str series: series of the episode.
-        :param year: year of the series, if any.
-        :type year: int
+        :param str pattern: pattern of the show to search.
         :return: the show id, if found.
         :rtype: int
 
         """
-        # addic7ed doesn't support search with quotes
-        series = series.replace('\'', ' ')
-
         # build the params
-        series_year = '%s %d' % (series, year) if year is not None else series
-        params = {'search': series_year, 'Submit': 'Search'}
+        params = {'search': pattern, 'Submit': 'Search'}
 
         # make the search
         logger.info('Searching show ids with %r', params)
@@ -178,17 +177,27 @@ class Addic7edProvider(Provider):
         soup = ParserBeautifulSoup(r.content, ['lxml', 'html.parser'])
 
         # get the suggestion
-        suggestion = soup.select('span.titulo > a[href^="/show/"]')
+        suggestion = soup.select('td > a[href^="serie/"]')
         if not suggestion:
-            logger.warning('Show id not found: no suggestion')
+            logger.debug('Show id not found: no suggestion')
             return None
-        if not sanitize(suggestion[0].i.text.replace('\'', ' ')) == sanitize(series_year):
-            logger.warning('Show id not found: suggestion does not match')
-            return None
-        show_id = int(suggestion[0]['href'][6:])
-        logger.debug('Found show id %d', show_id)
+        link = suggestion[0]['href']
+        logger.debug('Suggestion found: %s', link)
 
-        return show_id
+        # open the suggestion
+        r = self.session.get(self.server_url + link, timeout=10)
+        r.raise_for_status()
+        soup = ParserBeautifulSoup(r.content, ['lxml', 'html.parser'])
+
+        # get the show
+        for show in soup.select('td > a[href^="/show/"]'):
+            if sanitize(show.text) == sanitize(pattern):
+                show_id = int(show['href'][6:])
+                logger.debug('Found show id %d', show_id)
+                return show_id
+
+        logger.debug('Show id not found: suggestion does not match')
+        return None
 
     def get_show_id(self, series, year=None, country_code=None):
         """Get the best matching show id for `series`, `year` and `country_code`.
@@ -204,7 +213,7 @@ class Addic7edProvider(Provider):
         :rtype: int
 
         """
-        series_sanitized = sanitize(series).lower()
+        series_sanitized = sanitize(series, {'\''}).lower()
         show_ids = self._get_show_ids()
         show_id = None
 
@@ -224,9 +233,26 @@ class Addic7edProvider(Provider):
             show_id = show_ids.get(series_sanitized)
 
         # search as last resort
-        if not show_id:
+        if show_ids and not show_id:
             logger.warning('Series %s not found in show ids', series)
-            show_id = self._search_show_id(series)
+
+        # attempt with country
+        if not show_id and country_code:
+            logger.debug('Searching show id with country')
+            show_id = self._search_show_id('%s %s' % (series_sanitized, country_code.lower()))
+
+        # attempt with year
+        if not show_id and year:
+            logger.debug('Searching show id with year')
+            show_id = self._search_show_id('%s %d' % (series_sanitized, year))
+
+        # attempt clean
+        if not show_id:
+            logger.debug('Searching show id')
+            show_id = self._search_show_id(series_sanitized)
+
+        if not show_id:
+            logger.warning('Series %s not found', series)
 
         return show_id
 
